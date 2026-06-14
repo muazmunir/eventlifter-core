@@ -1,0 +1,31 @@
+{
+  "name": "eventlifter-core",
+  "version": "0.1.0",
+  "description": "EventLifter channel manager — adapter core for HighTribe, Eventbrite, and Luma",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dry": "ts-node src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "dev": "ts-node src/http/server.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.18.0",
+    "bullmq": "^5.12.0",
+    "express": "^4.19.2",
+    "ioredis": "^5.4.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "prisma": "^5.18.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  }
+}

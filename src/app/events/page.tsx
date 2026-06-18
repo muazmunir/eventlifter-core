@@ -10,6 +10,36 @@ import type { ChannelKey } from '@/lib/types'
 
 type Tab = 'hightribe' | 'luma' | 'eventbrite'
 
+const CH_LABELS: Record<ChannelKey, string> = {
+  hightribe: '🏔 HighTribe',
+  luma: '✨ Luma',
+  eventbrite: '🎫 Eventbrite',
+}
+
+type DeleteLink = { channel: ChannelKey; eventId: string | number }
+
+async function deleteOnChannel(channel: ChannelKey, id: string | number): Promise<void> {
+  if (channel === 'hightribe') {
+    const res = await fetch(`/api/hightribe/events/${id}`, { method: 'DELETE', headers: { Authorization: authHeader() } })
+    if (!res.ok) { const d = await res.json() as { message?: string }; throw new Error(d.message || `HTTP ${res.status}`) }
+    return
+  }
+  if (channel === 'luma') {
+    const res = await fetch('/api/luma/events/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: authHeader() },
+      body: JSON.stringify({ event_id: String(id), should_refund: true }),
+    })
+    const raw = await res.json() as { status?: string; message?: string; error?: string }
+    if (!res.ok || raw.status === 'error') {
+      throw new Error(raw.message || raw.error || `HTTP ${res.status}`)
+    }
+    return
+  }
+  const res = await fetch(`/api/eventbrite/events/${id}`, { method: 'DELETE' })
+  if (!res.ok) { const d = await res.json() as { error_description?: string }; throw new Error(d.error_description || `HTTP ${res.status}`) }
+}
+
 // ─── HighTribe ───────────────────────────────────────────────────────────────
 interface HtDateInfo {
   start_date?: string; start_time?: string; end_date?: string; end_time?: string
@@ -72,20 +102,60 @@ function fmtUtc(utc?: string): string {
 }
 
 // ─── Delete confirm dialog ────────────────────────────────────────────────────
-function DeleteDialog({ title, onConfirm, onCancel }: { title: string; onConfirm: () => void; onCancel: () => void }) {
+function DeleteDialog({
+  title, sourceChannel, linked, alsoDelete, onToggle, onConfirm, onCancel,
+}: {
+  title: string
+  sourceChannel: ChannelKey
+  linked: DeleteLink[]
+  alsoDelete: Partial<Record<ChannelKey, boolean>>
+  onToggle: (ch: ChannelKey) => void
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  const others = linked.filter(l => l.channel !== sourceChannel)
+  const alsoCount = others.filter(l => alsoDelete[l.channel]).length
+
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.75)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2000 }}>
-      <div style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:'10px', padding:'24px 28px', maxWidth:'380px', width:'100%', margin:'20px' }}>
+      <div style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:'10px', padding:'24px 28px', maxWidth:'420px', width:'100%', margin:'20px' }}>
         <div style={{ fontSize:'15px', fontWeight:700, color:'#e6edf3', marginBottom:'10px' }}>Delete Event?</div>
-        <div style={{ fontSize:'13px', color:'#8b949e', marginBottom:'20px', lineHeight:'1.5' }}>
-          Are you sure you want to delete <b style={{ color:'#e6edf3' }}>{title}</b>? This action cannot be undone.
+        <div style={{ fontSize:'13px', color:'#8b949e', marginBottom:'16px', lineHeight:'1.5' }}>
+          Delete <b style={{ color:'#e6edf3' }}>{title}</b> from {CH_LABELS[sourceChannel]}?
+          {others.length > 0 && ' You can also remove copies on other channels.'}
         </div>
+
+        {others.length > 0 && (
+          <div style={{ marginBottom:'20px', display:'flex', flexDirection:'column', gap:'8px' }}>
+            <div style={{ fontSize:'12px', fontWeight:600, color:'#8b949e', textTransform:'uppercase', letterSpacing:'0.04em' }}>
+              Also delete from
+            </div>
+            {others.map(({ channel }) => (
+              <label
+                key={channel}
+                style={{
+                  display:'flex', alignItems:'center', gap:'10px', padding:'10px 12px',
+                  background:'#1c2128', border:'1px solid #30363d', borderRadius:'8px', cursor:'pointer',
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={!!alsoDelete[channel]}
+                  onChange={() => onToggle(channel)}
+                  style={{ width:16, height:16, accentColor:'#f85149' }}
+                />
+                <span style={{ fontSize:'13px', color:'#e6edf3' }}>{CH_LABELS[channel]}</span>
+              </label>
+            ))}
+          </div>
+        )}
+
         <div style={{ display:'flex', gap:'8px', justifyContent:'flex-end' }}>
           <button onClick={onCancel} style={{ background:'none', border:'1px solid #30363d', borderRadius:'6px', color:'#8b949e', padding:'7px 16px', fontSize:'13px', cursor:'pointer' }}>
             Cancel
           </button>
           <button onClick={onConfirm} style={{ background:'#b91c1c', border:'none', borderRadius:'6px', color:'#fff', padding:'7px 16px', fontSize:'13px', fontWeight:600, cursor:'pointer' }}>
-            Delete
+            {alsoCount > 0 ? `Delete from ${1 + alsoCount} channels` : 'Delete'}
           </button>
         </div>
       </div>
@@ -188,6 +258,8 @@ export default function EventsPage() {
 
   // Delete confirm
   const [deleteTarget, setDeleteTarget] = useState<{ channel: ChannelKey; id: string|number; title: string } | null>(null)
+  const [deleteLinks, setDeleteLinks] = useState<DeleteLink[]>([])
+  const [deleteAlso, setDeleteAlso] = useState<Partial<Record<ChannelKey, boolean>>>({})
   const [deleting, setDeleting] = useState(false)
 
   // HighTribe state
@@ -270,32 +342,105 @@ export default function EventsPage() {
     finally { setEbLoading(false) }
   }, [toast])
 
+  // Load linked copies when delete dialog opens
+  useEffect(() => {
+    if (!deleteTarget) {
+      setDeleteLinks([])
+      setDeleteAlso({})
+      return
+    }
+    let cancelled = false
+    ;(async () => {
+      const links: DeleteLink[] = [{ channel: deleteTarget.channel, eventId: deleteTarget.id }]
+      const also: Partial<Record<ChannelKey, boolean>> = {}
+
+      try {
+        const res = await fetch(
+          `/api/registry/lookup?channel=${deleteTarget.channel}&eventId=${encodeURIComponent(String(deleteTarget.id))}`,
+        )
+        if (res.ok) {
+          const data = await res.json() as { links?: Partial<Record<ChannelKey, { eventId: string }>> }
+          for (const ch of ['hightribe', 'luma', 'eventbrite'] as ChannelKey[]) {
+            if (ch === deleteTarget.channel) continue
+            const ref = data.links?.[ch]
+            if (ref?.eventId) {
+              links.push({ channel: ch, eventId: ref.eventId })
+              also[ch] = true
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
+      const norm = deleteTarget.title.trim().toLowerCase()
+      const has = (ch: ChannelKey) => links.some(l => l.channel === ch)
+
+      if (deleteTarget.channel !== 'hightribe' && !has('hightribe')) {
+        const match = htEvents.find(e => e.title.trim().toLowerCase() === norm)
+        if (match) { links.push({ channel: 'hightribe', eventId: match.id }); also.hightribe = true }
+      }
+      if (deleteTarget.channel !== 'luma' && !has('luma')) {
+        const match = lumaEvents.find(e => e.name.trim().toLowerCase() === norm)
+        if (match) { links.push({ channel: 'luma', eventId: match.api_id }); also.luma = true }
+      }
+      if (deleteTarget.channel !== 'eventbrite' && !has('eventbrite')) {
+        const match = ebEvents.find(e => (e.name?.text || '').trim().toLowerCase() === norm)
+        if (match) { links.push({ channel: 'eventbrite', eventId: match.id }); also.eventbrite = true }
+      }
+
+      if (!cancelled) {
+        setDeleteLinks(links)
+        setDeleteAlso(also)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [deleteTarget, htEvents, lumaEvents, ebEvents])
+
   // ── Delete handler ────────────────────────────────────────────────────────
   async function handleDelete() {
     if (!deleteTarget) return
     setDeleting(true)
     const { channel, id } = deleteTarget
-    try {
-      if (channel === 'hightribe') {
-        const res = await fetch(`/api/hightribe/events/${id}`, { method:'DELETE', headers:{ Authorization:authHeader() } })
-        if (!res.ok) { const d = await res.json() as { message?: string }; throw new Error(d.message || `HTTP ${res.status}`) }
-        setHtEvents(ev => ev.filter(e => String(e.id) !== String(id)))
-      } else if (channel === 'luma') {
-        const res = await fetch('/api/luma/events/cancel', { method:'POST', headers:{'Content-Type':'application/json', Authorization: authHeader()}, body: JSON.stringify({ api_id: id }) })
-        if (!res.ok) { const d = await res.json() as { error?: string }; throw new Error(d.error || `HTTP ${res.status}`) }
-        setLumaEvents(ev => ev.filter(e => e.api_id !== id))
-      } else if (channel === 'eventbrite') {
-        const res = await fetch(`/api/eventbrite/events/${id}`, { method:'DELETE' })
-        if (!res.ok) { const d = await res.json() as { error_description?: string }; throw new Error(d.error_description || `HTTP ${res.status}`) }
-        setEbEvents(ev => ev.filter(e => e.id !== id))
+
+    const targets: DeleteLink[] = [{ channel, eventId: id }]
+    for (const link of deleteLinks) {
+      if (link.channel !== channel && deleteAlso[link.channel]) {
+        targets.push(link)
       }
-      toast.success(`Event deleted successfully`)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Delete failed')
-    } finally {
-      setDeleting(false)
-      setDeleteTarget(null)
     }
+
+    const errors: string[] = []
+    for (const t of targets) {
+      try {
+        await deleteOnChannel(t.channel, t.eventId)
+        if (t.channel === 'hightribe') setHtEvents(ev => ev.filter(e => String(e.id) !== String(t.eventId)))
+        else if (t.channel === 'luma') setLumaEvents(ev => ev.filter(e => e.api_id !== String(t.eventId)))
+        else setEbEvents(ev => ev.filter(e => e.id !== String(t.eventId)))
+      } catch (err) {
+        errors.push(`${CH_LABELS[t.channel]}: ${err instanceof Error ? err.message : 'failed'}`)
+      }
+    }
+
+    try {
+      const res = await fetch(
+        `/api/registry/lookup?channel=${channel}&eventId=${encodeURIComponent(String(id))}`,
+      )
+      if (res.ok) {
+        const data = await res.json() as { master?: { id: string } }
+        if (data.master?.id) {
+          await fetch('/api/registry', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'delete', masterId: data.master.id }),
+          })
+        }
+      }
+    } catch { /* non-fatal */ }
+
+    if (errors.length) toast.error(errors.join(' · '))
+    else toast.success(targets.length > 1 ? `Deleted from ${targets.length} channels` : 'Event deleted successfully')
+
+    setDeleting(false)
+    setDeleteTarget(null)
   }
 
   useEffect(() => {
@@ -373,7 +518,15 @@ export default function EventsPage() {
       />
 
       {deleteTarget && !deleting && (
-        <DeleteDialog title={deleteTarget.title} onConfirm={handleDelete} onCancel={() => setDeleteTarget(null)} />
+        <DeleteDialog
+          title={deleteTarget.title}
+          sourceChannel={deleteTarget.channel}
+          linked={deleteLinks}
+          alsoDelete={deleteAlso}
+          onToggle={(ch) => setDeleteAlso(prev => ({ ...prev, [ch]: !prev[ch] }))}
+          onConfirm={handleDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
       )}
       {deleting && (
         <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2000, color:'#e6edf3', fontSize:'15px' }}>

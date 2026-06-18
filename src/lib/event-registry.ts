@@ -121,3 +121,23 @@ export function linkChannelEvent(
   master.channels[channel] = ref
   return saveMasterEvent(master)
 }
+
+export function deleteMasterEvent(id: string): boolean {
+  const data = readAll()
+  const next = data.events.filter(e => e.id !== id)
+  if (next.length === data.events.length) return false
+  writeAll({ events: next })
+  return true
+}
+
+export function removeChannelFromMaster(masterId: string, channel: ChannelKey): MasterEventRecord | null {
+  const master = getMasterEvent(masterId)
+  if (!master) return null
+  delete master.channels[channel]
+  const remaining = Object.keys(master.channels).length
+  if (remaining === 0) {
+    deleteMasterEvent(masterId)
+    return null
+  }
+  return saveMasterEvent(master)
+}

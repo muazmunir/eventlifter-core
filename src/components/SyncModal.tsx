@@ -294,6 +294,7 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
     }
 
     const newResults: Partial<Record<ChannelKey, ChannelResult>> = {}
+    const channelRefs: Partial<Record<ChannelKey, { eventId: string; url?: string }>> = {}
 
     await Promise.all(
       targets.map(async (ch) => {
@@ -335,6 +336,7 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
               throw new Error(msg)
             }
             const newId = (data.data as Record<string, unknown>)?.id || '—'
+            if (newId !== '—') channelRefs[ch] = { eventId: String(newId) }
             newResults[ch] = { status: 'success', message: `Created on HighTribe (ID: ${newId})` }
           }
 
@@ -370,6 +372,7 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
             const raw = await res.json() as { status?: string; data?: { api_id?: string }; message?: string; error?: string }
             if (!res.ok || raw.status === 'error') throw new Error(raw.message || raw.error || `HTTP ${res.status}`)
             const id = raw.data?.api_id || '—'
+            if (id !== '—') channelRefs[ch] = { eventId: String(id), url: `lu.ma/${id}` }
             newResults[ch] = { status: 'success', message: `Created on Luma (${id})` }
           }
 
@@ -453,6 +456,7 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
               const d = await tcRes.json() as { error_description?: string }
               throw new Error(`Tickets: ${d.error_description || `HTTP ${tcRes.status}`}`)
             }
+            channelRefs[ch] = { eventId: eventId2, url: `eventbrite.com/e/${eventId2}` }
             newResults[ch] = { status: 'success', message: `Created on Eventbrite (ID: ${eventId2})` }
           }
         } catch (err) {
@@ -463,6 +467,38 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
         }
       })
     )
+
+    try {
+      channelRefs[source] = { eventId: String(event.id) }
+      let masterId: string | undefined
+      const lookup = await fetch(
+        `/api/registry/lookup?channel=${source}&eventId=${encodeURIComponent(String(event.id))}`,
+      )
+      if (lookup.ok) {
+        const d = await lookup.json() as { master?: { id: string } }
+        masterId = d.master?.id
+      }
+      if (!masterId) {
+        const created = await fetch('/api/registry', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'create',
+            title: publishTitle,
+            capacity: ebTicketQuantity(norm.capacity),
+          }),
+        })
+        masterId = (await created.json() as { id: string }).id
+      }
+      for (const [ch, ref] of Object.entries(channelRefs) as [ChannelKey, { eventId: string; url?: string }][]) {
+        if (!ref?.eventId) continue
+        await fetch('/api/registry', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'link', masterId, channel: ch, ref }),
+        })
+      }
+    } catch { /* registry link is best-effort */ }
 
     setResults(newResults)
     setPublishing(false)

@@ -129,6 +129,51 @@ export async function getLumaEvent(eventId: string): Promise<Record<string, unkn
   throw lastErr || new LumaApiError(`Luma event not found: ${eventId}`, 404)
 }
 
+/** Two-step Luma cancel: request token, then confirm. */
+export async function cancelLumaEvent(
+  eventId: string,
+  opts?: { shouldRefund?: boolean },
+): Promise<Record<string, unknown>> {
+  const id = String(eventId)
+  const requestPaths = ['/v1/events/cancel/request', '/v1/event/cancel/request']
+  const cancelPaths = ['/v1/events/cancel', '/v1/event/cancel']
+
+  let tokenData: Record<string, unknown> | null = null
+  outer: for (const path of requestPaths) {
+    for (const reqBody of [{ event_id: id }, { api_id: id }]) {
+      try {
+        tokenData = await lumaRequest('POST', path, { body: reqBody })
+        break outer
+      } catch { /* try next body/path */ }
+    }
+  }
+  if (!tokenData) throw new LumaApiError('Failed to request Luma cancellation token', 400)
+
+  const nested = tokenData.data as Record<string, unknown> | undefined
+  const cancellationToken = String(
+    tokenData.cancellation_token || nested?.cancellation_token || '',
+  )
+  if (!cancellationToken) throw new LumaApiError('Luma did not return cancellation_token', 400)
+
+  const cancelBody: Record<string, unknown> = {
+    event_id: id,
+    cancellation_token: cancellationToken,
+  }
+  const hasPaid = !!(tokenData.has_paid_guests ?? tokenData.has_paid_registrations ?? nested?.has_paid_guests)
+  if (hasPaid || opts?.shouldRefund) cancelBody.should_refund = opts?.shouldRefund ?? true
+
+  for (const path of cancelPaths) {
+    try {
+      return await lumaRequest('POST', path, { body: cancelBody })
+    } catch {
+      try {
+        return await lumaRequest('POST', path, { body: { ...cancelBody, api_id: id } })
+      } catch { /* try next path */ }
+    }
+  }
+  throw new LumaApiError('Failed to cancel Luma event', 400)
+}
+
 /** Map Next.js proxy path segments to Luma API */
 export async function proxyLumaPath(
   pathSegments: string[],
@@ -161,7 +206,13 @@ export async function proxyLumaPath(
   }
 
   if (path === 'events/cancel' && method === 'POST') {
-    return { data: await lumaRequest('POST', '/v1/events/cancel', { body }), status: 200 }
+    const b = (body || {}) as Record<string, unknown>
+    const eventId = String(b.event_id || b.api_id || b.id || '')
+    if (!eventId) throw new LumaApiError('event_id required', 400)
+    return {
+      data: await cancelLumaEvent(eventId, { shouldRefund: !!b.should_refund }),
+      status: 200,
+    }
   }
 
   if (path === 'users/self' && method === 'GET') {

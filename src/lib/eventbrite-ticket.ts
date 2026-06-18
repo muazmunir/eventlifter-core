@@ -30,10 +30,9 @@ export function buildEbTicketClass(input: {
   if (isFree) {
     tc.free = true
   } else {
-    tc.cost = {
-      currency: (input.currency || 'USD').toUpperCase(),
-      value: Math.round(price * 100),
-    }
+    const currency = (input.currency || 'USD').toUpperCase()
+    const cents = Math.round(price * 100)
+    tc.cost = `${currency},${cents}`
   }
 
   return tc

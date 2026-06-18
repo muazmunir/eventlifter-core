@@ -141,22 +141,25 @@ export async function disconnectChannel(channel: ChannelKey, _hostId: string): P
 export async function getEvents(_hostId: string): Promise<EventsResponse> {
   // Fetch from Luma (best effort)
   try {
-    const res = await get<{ entries?: Array<{ event?: { api_id?: string; name?: string; start_at?: string; end_at?: string; timezone?: string }; role?: string }> }>('/api/luma/events/hosted')
-    const entries = res.entries || []
-    const events: MasterEvent[] = entries.map((e) => ({
-      id: e.event?.api_id || '',
-      hostId: 'luma',
-      title: e.event?.name || 'Untitled',
-      startUtc: e.event?.start_at || new Date().toISOString(),
-      endUtc: e.event?.end_at || new Date().toISOString(),
-      timezone: e.event?.timezone || 'UTC',
-      format: 'in_person',
-      ticketType: 'free',
-      priceCents: 0,
-      currency: 'USD',
-      visibility: 'public',
-      tags: [],
-    }))
+    const res = await get<{ data?: { entries?: Array<{ event?: { api_id?: string; name?: string; start_at?: string; end_at?: string; timezone?: string }; id?: string; name?: string; start_at?: string; end_at?: string; timezone?: string }> }; entries?: Array<{ event?: { api_id?: string; name?: string; start_at?: string; end_at?: string; timezone?: string }; id?: string; name?: string; start_at?: string; end_at?: string; timezone?: string }> }>('/api/luma/events/hosted?upcoming_only=false')
+    const entries = res.data?.entries || res.entries || []
+    const events: MasterEvent[] = entries.map((e) => {
+      const ev = e.event || (e.id ? { api_id: e.id, name: e.name, start_at: e.start_at, end_at: e.end_at, timezone: e.timezone } : undefined)
+      return {
+        id: ev?.api_id || '',
+        hostId: 'luma',
+        title: ev?.name || 'Untitled',
+        startUtc: ev?.start_at || new Date().toISOString(),
+        endUtc: ev?.end_at || new Date().toISOString(),
+        timezone: ev?.timezone || 'UTC',
+        format: 'in_person' as const,
+        ticketType: 'free' as const,
+        priceCents: 0,
+        currency: 'USD',
+        visibility: 'public' as const,
+        tags: [],
+      }
+    }).filter(e => e.id)
     return { events }
   } catch {
     return { events: [] }

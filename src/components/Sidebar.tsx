@@ -2,29 +2,44 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { useRouter, usePathname } from 'next/navigation'
+import { getUser, clearAuth, authHeader, type HtUser } from '@/lib/auth'
 
 const NAV_LINKS = [
   { href: '/', label: 'Dashboard', icon: '⊞' },
+  { href: '/events?create=1', label: 'Create Event', icon: '✦' },
   { href: '/channels', label: 'Channels', icon: '⛓' },
   { href: '/events', label: 'Events', icon: '📅' },
   { href: '/settings', label: 'Settings', icon: '⚙' },
 ]
 
 export function Sidebar() {
+  const router = useRouter()
   const pathname = usePathname()
-  const [hostId, setHostId] = useState('')
+  const [user, setUser] = useState<HtUser | null>(null)
+  const [loggingOut, setLoggingOut] = useState(false)
 
   useEffect(() => {
-    const stored = localStorage.getItem('eventlifter_hostId') || ''
-    setHostId(stored)
+    setUser(getUser())
   }, [])
 
-  const handleHostIdChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value
-    setHostId(val)
-    localStorage.setItem('eventlifter_hostId', val)
+  const handleLogout = async () => {
+    setLoggingOut(true)
+    try {
+      await fetch('/api/hightribe/logout', {
+        method: 'POST',
+        headers: { Authorization: authHeader(), Accept: 'application/json' },
+      })
+    } catch {
+      // ignore errors — clear locally regardless
+    }
+    clearAuth()
+    router.replace('/login')
   }
+
+  const initials = user?.name
+    ? user.name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase()
+    : '?'
 
   return (
     <aside
@@ -108,41 +123,94 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Host ID */}
-      <div
-        style={{
-          padding: '12px 16px',
-          borderTop: '1px solid #30363d',
-        }}
-      >
-        <label
-          style={{
-            display: 'block',
-            fontSize: '11px',
-            color: '#8b949e',
-            marginBottom: '6px',
-            textTransform: 'uppercase',
-            letterSpacing: '0.5px',
-          }}
-        >
-          Host ID
-        </label>
-        <input
-          type="text"
-          value={hostId}
-          onChange={handleHostIdChange}
-          placeholder="your-host-id"
-          style={{
-            width: '100%',
-            background: '#0d1117',
-            border: '1px solid #30363d',
-            borderRadius: '6px',
-            padding: '6px 10px',
-            fontSize: '12px',
-            color: '#e6edf3',
-            outline: 'none',
-          }}
-        />
+      {/* User info + logout */}
+      <div style={{ padding: '12px 16px', borderTop: '1px solid #30363d' }}>
+        {user ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+              <div
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #a78bfa, #388bfd)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  color: '#fff',
+                  flexShrink: 0,
+                }}
+              >
+                {initials}
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    color: '#e6edf3',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {user.name}
+                </div>
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: '#8b949e',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {user.email}
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={handleLogout}
+              disabled={loggingOut}
+              style={{
+                width: '100%',
+                background: 'none',
+                border: '1px solid #30363d',
+                borderRadius: '6px',
+                color: '#8b949e',
+                padding: '6px',
+                fontSize: '12px',
+                cursor: loggingOut ? 'default' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                opacity: loggingOut ? 0.5 : 1,
+              }}
+            >
+              ⎋ {loggingOut ? 'Signing out…' : 'Sign out'}
+            </button>
+          </>
+        ) : (
+          <Link
+            href="/login"
+            style={{
+              display: 'block',
+              textAlign: 'center',
+              background: '#388bfd',
+              borderRadius: '6px',
+              color: '#fff',
+              padding: '7px',
+              fontSize: '13px',
+              fontWeight: 500,
+              textDecoration: 'none',
+            }}
+          >
+            Sign in
+          </Link>
+        )}
       </div>
     </aside>
   )

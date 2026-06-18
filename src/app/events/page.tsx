@@ -1,497 +1,546 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { api } from '@/lib/api'
-import type { EventFormat, TicketType, Visibility } from '@/lib/types'
-import { Modal } from '@/components/Modal'
+import { useSearchParams, useRouter } from 'next/navigation'
+import { authHeader, getUser } from '@/lib/auth'
 import { Toast, useToast } from '@/components/Toast'
+import { SyncModal, SyncSource } from '@/components/SyncModal'
+import { CreateEventWizardModal } from '@/components/ewentcast/CreateEventWizardModal'
+import type { ChannelKey } from '@/lib/types'
 
-const TIMEZONES = [
-  'UTC', 'America/New_York', 'America/Chicago', 'America/Denver',
-  'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Europe/Berlin',
-  'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Australia/Sydney',
-]
+type Tab = 'hightribe' | 'luma' | 'eventbrite'
 
+// ─── HighTribe ───────────────────────────────────────────────────────────────
+interface HtDateInfo {
+  start_date?: string; start_time?: string; end_date?: string; end_time?: string
+  starts_at?: string; ends_at?: string; timezone?: string
+}
+interface HtLocation {
+  address?: string; city?: string; country?: string; venue_name?: string; type?: string
+}
+interface HtEvent {
+  id: string | number; user_id?: string | number; title: string
+  cover_image?: string; cover_image_aspect_ratio?: Array<{ image?: string }>
+  status?: string; publish_status?: string; is_active?: boolean
+  dates?: HtDateInfo; location?: HtLocation; slug?: string; share_url?: string
+}
+interface HtEventsResponse {
+  data?: HtEvent[]; current_page?: number; last_page?: number; total?: number
+}
+
+// ─── Luma ────────────────────────────────────────────────────────────────────
 interface LumaEvent {
-  api_id: string
-  name: string
-  start_at: string
-  end_at: string
-  timezone: string
-  description?: string
+  api_id: string; name: string; start_at: string; end_at: string; timezone: string
+  url?: string; cover_url?: string
+  geo_address_json?: { full_address?: string; city?: string }
+  meeting_url?: string
+}
+interface LumaEntry {
+  event?: LumaEvent
+  id?: string
+  name?: string
+  start_at?: string
+  end_at?: string
+  timezone?: string
   url?: string
   cover_url?: string
-  geo_address_json?: { full_address?: string; city?: string; country?: string }
+  geo_address_json?: { full_address?: string; city?: string }
   meeting_url?: string
 }
 
-interface LumaEntry {
-  event?: LumaEvent
-  role?: string
-}
-
+// ─── Eventbrite ──────────────────────────────────────────────────────────────
 interface EbEvent {
-  id: string
-  name?: { text?: string }
-  start?: { utc?: string }
-  end?: { utc?: string }
-  description?: { text?: string }
-  url?: string
-  is_free?: boolean
+  id: string; name?: { text?: string }
+  start?: { utc?: string }; end?: { utc?: string }
+  url?: string; logo?: { original?: { url?: string } }
+  is_free?: boolean; status?: string
 }
 
-interface UnifiedEvent {
-  id: string
-  source: 'luma' | 'eventbrite'
-  title: string
-  startUtc: string
-  endUtc: string
-  url?: string
-}
-
-function formatDate(utc: string) {
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function fmt(date?: string, time?: string): string {
+  if (!date) return '—'
   try {
-    return new Date(utc).toLocaleString(undefined, {
-      month: 'short', day: 'numeric', year: 'numeric',
-      hour: '2-digit', minute: '2-digit',
-    })
+    const dt = time ? new Date(`${date}T${time}`) : new Date(date)
+    return dt.toLocaleString(undefined, { month:'short', day:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' })
+  } catch { return date }
+}
+function fmtUtc(utc?: string): string {
+  if (!utc) return '—'
+  try {
+    return new Date(utc).toLocaleString(undefined, { month:'short', day:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' })
   } catch { return utc }
 }
 
-const INPUT_STYLE: React.CSSProperties = {
-  width: '100%', background: '#0d1117', border: '1px solid #30363d',
-  borderRadius: '6px', padding: '7px 10px', fontSize: '13px',
-  color: '#e6edf3', outline: 'none',
+// ─── Delete confirm dialog ────────────────────────────────────────────────────
+function DeleteDialog({ title, onConfirm, onCancel }: { title: string; onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.75)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2000 }}>
+      <div style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:'10px', padding:'24px 28px', maxWidth:'380px', width:'100%', margin:'20px' }}>
+        <div style={{ fontSize:'15px', fontWeight:700, color:'#e6edf3', marginBottom:'10px' }}>Delete Event?</div>
+        <div style={{ fontSize:'13px', color:'#8b949e', marginBottom:'20px', lineHeight:'1.5' }}>
+          Are you sure you want to delete <b style={{ color:'#e6edf3' }}>{title}</b>? This action cannot be undone.
+        </div>
+        <div style={{ display:'flex', gap:'8px', justifyContent:'flex-end' }}>
+          <button onClick={onCancel} style={{ background:'none', border:'1px solid #30363d', borderRadius:'6px', color:'#8b949e', padding:'7px 16px', fontSize:'13px', cursor:'pointer' }}>
+            Cancel
+          </button>
+          <button onClick={onConfirm} style={{ background:'#b91c1c', border:'none', borderRadius:'6px', color:'#fff', padding:'7px 16px', fontSize:'13px', fontWeight:600, cursor:'pointer' }}>
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
-const LABEL_STYLE: React.CSSProperties = {
-  display: 'block', fontSize: '12px', color: '#8b949e',
-  marginBottom: '5px', fontWeight: 500,
+// ─── EventCard ────────────────────────────────────────────────────────────────
+function EventCard({
+  image, title, dateStr, badge, badgeColor, location, url, status,
+  onEdit, onDelete,
+}: {
+  image?: string; title: string; dateStr: string; badge: string; badgeColor: string
+  location?: string; url?: string; status?: string
+  onEdit?: () => void; onDelete?: () => void
+}) {
+  return (
+    <div style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:'10px', overflow:'hidden', display:'flex', gap:0 }}>
+      {/* Cover */}
+      {image ? (
+        <div style={{ width:'120px', flexShrink:0, background:'#1c2128', overflow:'hidden' }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={image} alt={title} style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+        </div>
+      ) : (
+        <div style={{ width:'120px', flexShrink:0, background:'#1c2128', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'32px' }}>📅</div>
+      )}
+
+      {/* Info */}
+      <div style={{ flex:1, padding:'14px 16px', minWidth:0 }}>
+        <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:'12px' }}>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:'15px', fontWeight:600, color:'#e6edf3', marginBottom:'5px', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              {title}
+            </div>
+            <div style={{ display:'flex', gap:'8px', flexWrap:'wrap', fontSize:'12px', color:'#8b949e', marginBottom:'8px' }}>
+              <span>📅 {dateStr}</span>
+              {location && <><span>·</span><span>📍 {location}</span></>}
+            </div>
+            <div style={{ display:'flex', gap:'6px', flexWrap:'wrap', alignItems:'center' }}>
+              <span style={{ fontSize:'11px', padding:'2px 8px', borderRadius:'4px', background:badgeColor+'1a', border:`1px solid ${badgeColor}4d`, color:badgeColor }}>{badge}</span>
+              {status && (
+                <span style={{ fontSize:'11px', padding:'2px 8px', borderRadius:'4px', background: status==='published'||status==='live' ? 'rgba(63,185,80,0.1)' : 'rgba(139,148,158,0.15)', border:`1px solid ${status==='published'||status==='live' ? 'rgba(63,185,80,0.3)' : '#30363d'}`, color: status==='published'||status==='live' ? '#3fb950' : '#8b949e' }}>
+                  {status}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <div style={{ display:'flex', gap:'6px', flexShrink:0, alignItems:'center', flexWrap:'wrap', justifyContent:'flex-end' }}>
+            {onEdit && (
+              <button onClick={onEdit} style={{ background:'rgba(56,139,253,0.1)', border:'1px solid rgba(56,139,253,0.35)', borderRadius:'6px', color:'#388bfd', padding:'5px 10px', fontSize:'12px', fontWeight:500, cursor:'pointer' }}>
+                ✎ Edit
+              </button>
+            )}
+            {onDelete && (
+              <button onClick={onDelete} style={{ background:'rgba(248,81,73,0.08)', border:'1px solid rgba(248,81,73,0.3)', borderRadius:'6px', color:'#f85149', padding:'5px 10px', fontSize:'12px', fontWeight:500, cursor:'pointer' }}>
+                🗑 Delete
+              </button>
+            )}
+            {url && (
+              <a href={url} target="_blank" rel="noopener noreferrer" style={{ display:'flex', alignItems:'center', gap:'4px', background:'rgba(56,139,253,0.12)', border:'1px solid rgba(56,139,253,0.35)', borderRadius:'6px', color:'#388bfd', padding:'5px 10px', fontSize:'12px', fontWeight:500, textDecoration:'none', whiteSpace:'nowrap' }}>
+                View ↗
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }
 
-interface FormData {
-  title: string; summary: string; description: string
-  startUtc: string; endUtc: string; timezone: string
-  format: EventFormat; venueName: string; address: string
-  city: string; country: string; onlineUrl: string
-  ticketType: TicketType; priceCents: string; currency: string
-  capacity: string; visibility: Visibility; tags: string
+function EmptyState({ channel }: { channel: string }) {
+  return (
+    <div style={{ background:'#161b22', border:'2px dashed #30363d', borderRadius:'10px', padding:'60px 24px', textAlign:'center' }}>
+      <div style={{ fontSize:'40px', marginBottom:'12px' }}>📭</div>
+      <div style={{ fontSize:'15px', color:'#e6edf3', fontWeight:500, marginBottom:'8px' }}>No {channel} events found</div>
+      <p style={{ color:'#8b949e', fontSize:'13px', margin:0 }}>Make sure your {channel} credentials are configured in Settings</p>
+    </div>
+  )
 }
 
-const EMPTY_FORM: FormData = {
-  title: '', summary: '', description: '',
-  startUtc: '', endUtc: '', timezone: 'UTC',
-  format: 'in_person', venueName: '', address: '', city: '', country: '', onlineUrl: '',
-  ticketType: 'free', priceCents: '', currency: 'USD',
-  capacity: '', visibility: 'public', tags: '',
-}
-
+// ─── Main page ────────────────────────────────────────────────────────────────
 export default function EventsPage() {
-  const [events, setEvents] = useState<UnifiedEvent[]>([])
-  const [loading, setLoading] = useState(true)
-  const [modalOpen, setModalOpen] = useState(false)
-  const [submitting, setSubmitting] = useState(false)
-  const [form, setForm] = useState<FormData>(EMPTY_FORM)
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const [tab, setTab] = useState<Tab>('hightribe')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [editModal, setEditModal] = useState<{
+    open: boolean; channel: ChannelKey; eventId: string | number
+  }>({ open: false, channel: 'hightribe', eventId: '' })
   const { toasts, toast, removeToast } = useToast()
 
-  const loadEvents = useCallback(async () => {
-    setLoading(true)
+  // Sync modal
+  const [syncEvent, setSyncEvent] = useState<{ id: string | number; title: string; source: SyncSource } | null>(null)
+  const [htConfigured, setHtConfigured] = useState(false)
+  const [lumaConfigured, setLumaConfigured] = useState(false)
+  const [ebConfigured, setEbConfigured] = useState(false)
+
+  // Delete confirm
+  const [deleteTarget, setDeleteTarget] = useState<{ channel: ChannelKey; id: string|number; title: string } | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  // HighTribe state
+  const [htEvents, setHtEvents] = useState<HtEvent[]>([])
+  const [htLoading, setHtLoading] = useState(false)
+  const [htPage, setHtPage] = useState(1)
+  const [htLastPage, setHtLastPage] = useState(1)
+  const [htTotal, setHtTotal] = useState<number | null>(null)
+
+  // Luma state
+  const [lumaEvents, setLumaEvents] = useState<LumaEvent[]>([])
+  const [lumaLoading, setLumaLoading] = useState(false)
+
+  // Eventbrite state
+  const [ebEvents, setEbEvents] = useState<EbEvent[]>([])
+  const [ebLoading, setEbLoading] = useState(false)
+
+  // ── Fetchers ──────────────────────────────────────────────────────────────
+  const loadHtEvents = useCallback(async (page = 1) => {
+    setHtLoading(true)
     try {
-      const unified: UnifiedEvent[] = []
+      const user = getUser()
+      const params = new URLSearchParams({ per_page:'12', page:String(page), sort_field:'id', sort_direction:'desc' })
+      if (user?.email) params.set('user_email', user.email)
+      const res = await fetch(`/api/hightribe/events/all?${params}`, { headers:{ Authorization:authHeader(), Accept:'application/json' } })
+      const data: HtEventsResponse = await res.json()
+      const userId = user?.id
+      const all = data.data || []
+      const mine = userId ? all.filter(e => e.user_id === undefined || String(e.user_id) === String(userId)) : all
+      setHtEvents(mine)
+      setHtPage(data.current_page || 1)
+      setHtLastPage(data.last_page || 1)
+      if (data.total !== undefined) setHtTotal(mine.length < all.length ? mine.length : data.total)
+    } catch { toast.error('Failed to load HighTribe events') }
+    finally { setHtLoading(false) }
+  }, [toast])
 
-      // Luma hosted events
-      try {
-        const lumaRes = await api.getLumaHostedEvents() as { entries?: LumaEntry[] }
-        const entries = lumaRes.entries || []
-        for (const e of entries) {
-          if (e.event) {
-            unified.push({
-              id: e.event.api_id,
-              source: 'luma',
-              title: e.event.name || 'Untitled',
-              startUtc: e.event.start_at,
-              endUtc: e.event.end_at,
-              url: e.event.url,
-            })
+  const loadLumaEvents = useCallback(async () => {
+    setLumaLoading(true)
+    try {
+      const res = await fetch('/api/luma/events/hosted?upcoming_only=false&fetch_all=true', { headers: { Authorization: authHeader() } })
+      const raw = await res.json() as { data?: { entries?: LumaEntry[] }; entries?: LumaEntry[]; status?: string; message?: string; error?: string }
+      if (!res.ok || raw.status === 'error') {
+        toast.error(`Luma: ${raw.message || raw.error || `HTTP ${res.status}`}`)
+        return
+      }
+      const entries = raw.data?.entries || raw.entries || []
+      setLumaEvents(entries.map((e): LumaEvent | null => {
+        if (e.event) return e.event
+        if (e.id && e.name) {
+          return {
+            api_id: e.id,
+            name: e.name,
+            start_at: e.start_at || '',
+            end_at: e.end_at || '',
+            timezone: e.timezone || 'UTC',
+            url: e.url,
+            cover_url: e.cover_url,
+            geo_address_json: e.geo_address_json,
+            meeting_url: e.meeting_url,
           }
         }
-      } catch {
-        // Luma not configured or unavailable
-      }
+        return null
+      }).filter((e): e is LumaEvent => !!e))
+    } catch { toast.error('Failed to load Luma events') }
+    finally { setLumaLoading(false) }
+  }, [toast])
 
-      // Eventbrite events (via organizations)
-      try {
-        const orgRes = await api.getEbOrganizations() as { organizations?: Array<{ id: string }> }
-        const orgs = orgRes.organizations || []
-        for (const org of orgs.slice(0, 1)) {
-          const evtRes = await api.getEbOrgEvents(org.id) as { events?: EbEvent[] }
-          const evts = evtRes.events || []
-          for (const ev of evts.slice(0, 20)) {
-            unified.push({
-              id: ev.id,
-              source: 'eventbrite',
-              title: ev.name?.text || 'Untitled',
-              startUtc: ev.start?.utc || new Date().toISOString(),
-              endUtc: ev.end?.utc || new Date().toISOString(),
-              url: ev.url,
-            })
-          }
-        }
-      } catch {
-        // Eventbrite not configured or unavailable
-      }
+  const loadEbEvents = useCallback(async () => {
+    setEbLoading(true)
+    try {
+      const orgRes = await fetch('/api/eventbrite/users/me/organizations')
+      const orgData = await orgRes.json() as { organizations?: Array<{ id: string }> }
+      const orgs = orgData.organizations || []
+      if (orgs.length === 0) { setEbEvents([]); return }
+      const evtRes = await fetch(`/api/eventbrite/organizations/${orgs[0].id}/events?page_size=50`)
+      const evtData = await evtRes.json() as { events?: EbEvent[] }
+      setEbEvents(evtData.events || [])
+    } catch { toast.error('Failed to load Eventbrite events') }
+    finally { setEbLoading(false) }
+  }, [toast])
 
-      // Sort by start date descending
-      unified.sort((a, b) => new Date(b.startUtc).getTime() - new Date(a.startUtc).getTime())
-      setEvents(unified)
+  // ── Delete handler ────────────────────────────────────────────────────────
+  async function handleDelete() {
+    if (!deleteTarget) return
+    setDeleting(true)
+    const { channel, id } = deleteTarget
+    try {
+      if (channel === 'hightribe') {
+        const res = await fetch(`/api/hightribe/events/${id}`, { method:'DELETE', headers:{ Authorization:authHeader() } })
+        if (!res.ok) { const d = await res.json() as { message?: string }; throw new Error(d.message || `HTTP ${res.status}`) }
+        setHtEvents(ev => ev.filter(e => String(e.id) !== String(id)))
+      } else if (channel === 'luma') {
+        const res = await fetch('/api/luma/events/cancel', { method:'POST', headers:{'Content-Type':'application/json', Authorization: authHeader()}, body: JSON.stringify({ api_id: id }) })
+        if (!res.ok) { const d = await res.json() as { error?: string }; throw new Error(d.error || `HTTP ${res.status}`) }
+        setLumaEvents(ev => ev.filter(e => e.api_id !== id))
+      } else if (channel === 'eventbrite') {
+        const res = await fetch(`/api/eventbrite/events/${id}`, { method:'DELETE' })
+        if (!res.ok) { const d = await res.json() as { error_description?: string }; throw new Error(d.error_description || `HTTP ${res.status}`) }
+        setEbEvents(ev => ev.filter(e => e.id !== id))
+      }
+      toast.success(`Event deleted successfully`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Delete failed')
     } finally {
-      setLoading(false)
+      setDeleting(false)
+      setDeleteTarget(null)
     }
-  }, [])
-
-  useEffect(() => { loadEvents() }, [loadEvents])
-
-  const handleField = (field: keyof FormData, value: string) => {
-    setForm((f) => ({ ...f, [field]: value }))
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!form.title.trim()) { toast.error('Title is required'); return }
-    if (!form.startUtc) { toast.error('Start date is required'); return }
-    if (!form.endUtc) { toast.error('End date is required'); return }
-    setSubmitting(true)
-    try {
-      await api.createLumaEvent({
-        name: form.title,
-        summary: form.summary || undefined,
-        description: form.description || undefined,
-        start_at: new Date(form.startUtc).toISOString(),
-        end_at: new Date(form.endUtc).toISOString(),
-        timezone: form.timezone,
-        meeting_url: form.onlineUrl || undefined,
-        geo_address_json: form.address ? {
-          full_address: form.address,
-          city: form.city,
-          country: form.country,
-        } : undefined,
-        capacity: form.capacity ? parseInt(form.capacity) : undefined,
-        tags: form.tags ? form.tags.split(',').map((t) => t.trim()).filter(Boolean) : [],
-        require_rsvp_approval: false,
-      })
-      toast.success('Event created in Luma!')
-      setModalOpen(false)
-      setForm(EMPTY_FORM)
-      await loadEvents()
-    } catch (err) {
-      toast.error(`Failed: ${err instanceof Error ? err.message : String(err)}`)
-    } finally {
-      setSubmitting(false)
-    }
+  useEffect(() => {
+    fetch('/api/settings').then(r => r.json()).then((s: {
+      luma?: { apiKey?: string }; eventbrite?: { privateToken?: string; clientId?: string }
+    }) => {
+      setHtConfigured(true)
+      setLumaConfigured(!!s.luma?.configured)
+      setEbConfigured(!!(s.eventbrite?.privateToken || s.eventbrite?.clientId))
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (tab === 'hightribe' && htEvents.length === 0 && !htLoading) loadHtEvents(1)
+    if (tab === 'luma' && lumaEvents.length === 0 && !lumaLoading) loadLumaEvents()
+    if (tab === 'eventbrite' && ebEvents.length === 0 && !ebLoading) loadEbEvents()
+  }, [tab]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const TABS: { key: Tab; label: string; color: string }[] = [
+    { key:'hightribe', label:'🏔 HighTribe', color:'#a78bfa' },
+    { key:'luma',      label:'✨ Luma',      color:'#22d3ee' },
+    { key:'eventbrite',label:'🎫 Eventbrite',color:'#fbbf24' },
+  ]
+
+  function openCreate() { setCreateOpen(true) }
+  function closeCreate() {
+    setCreateOpen(false)
+    router.replace('/events', { scroll: false })
+  }
+
+  useEffect(() => {
+    if (searchParams.get('create') === '1') setCreateOpen(true)
+  }, [searchParams])
+
+  function onPublished() {
+    setHtEvents([])
+    setLumaEvents([])
+    setEbEvents([])
+    loadHtEvents(1)
+    loadLumaEvents()
+    loadEbEvents()
+  }
+  function openEdit(channel: ChannelKey, id: string|number) {
+    setEditModal({ open: true, channel, eventId: id })
+  }
+
+  function onSaved(channel: ChannelKey) {
+    const label = channel === 'hightribe' ? 'HighTribe' : channel === 'luma' ? 'Luma' : 'Eventbrite'
+    toast.success(`Event updated on ${label}!`)
+    setEditModal(f => ({ ...f, open: false }))
+    if (channel === 'hightribe') { setHtEvents([]); loadHtEvents(1) }
+    else if (channel === 'luma') { setLumaEvents([]); loadLumaEvents() }
+    else { setEbEvents([]); loadEbEvents() }
   }
 
   return (
-    <div style={{ maxWidth: '960px' }}>
+    <div style={{ maxWidth:'960px' }}>
       <Toast toasts={toasts} onRemove={removeToast} />
 
-      {/* Page header */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: '28px',
-        }}
-      >
-        <div>
-          <h1 style={{ margin: 0, fontSize: '22px', fontWeight: 700, color: '#e6edf3' }}>
-            Events
-          </h1>
-          <p style={{ margin: '4px 0 0', fontSize: '14px', color: '#8b949e' }}>
-            Events from your connected channels
-          </p>
+      <SyncModal open={!!syncEvent} event={syncEvent} htConfigured={htConfigured} lumaConfigured={lumaConfigured} ebConfigured={ebConfigured} onClose={() => setSyncEvent(null)} />
+
+      <CreateEventWizardModal
+        open={createOpen}
+        onClose={closeCreate}
+        onPublished={onPublished}
+      />
+
+      <CreateEventWizardModal
+        open={editModal.open}
+        mode="edit"
+        editChannel={editModal.channel}
+        editEventId={editModal.eventId}
+        onClose={() => setEditModal(f => ({ ...f, open: false }))}
+        onPublished={() => onSaved(editModal.channel)}
+      />
+
+      {deleteTarget && !deleting && (
+        <DeleteDialog title={deleteTarget.title} onConfirm={handleDelete} onCancel={() => setDeleteTarget(null)} />
+      )}
+      {deleting && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2000, color:'#e6edf3', fontSize:'15px' }}>
+          Deleting…
         </div>
-        <button
-          onClick={() => setModalOpen(true)}
-          style={{
-            background: '#388bfd', border: 'none', borderRadius: '6px',
-            color: '#fff', padding: '9px 18px', fontSize: '14px', fontWeight: 500,
-            cursor: 'pointer',
-          }}
-        >
+      )}
+
+      {/* Header */}
+      <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', marginBottom:'24px', gap:'16px' }}>
+        <div>
+          <h1 style={{ margin:0, fontSize:'22px', fontWeight:700, color:'#e6edf3' }}>Events</h1>
+          <p style={{ margin:'4px 0 0', fontSize:'14px', color:'#8b949e' }}>Browse events from all your connected channels</p>
+        </div>
+        <button onClick={openCreate} style={{ background:'#238636', border:'1px solid #2ea043', borderRadius:'8px', color:'#fff', padding:'10px 18px', fontSize:'13px', fontWeight:600, cursor:'pointer', display:'flex', alignItems:'center', gap:'6px', whiteSpace:'nowrap', flexShrink:0 }}>
           + Create Event
         </button>
       </div>
 
-      {/* Event list */}
-      {loading ? (
-        <div style={{ color: '#8b949e', fontSize: '14px' }}>Loading events…</div>
-      ) : events.length === 0 ? (
-        <div
-          style={{
-            background: '#161b22', border: '2px dashed #30363d', borderRadius: '10px',
-            padding: '60px 24px', textAlign: 'center',
-          }}
-        >
-          <div style={{ fontSize: '40px', marginBottom: '12px' }}>📅</div>
-          <div style={{ fontSize: '16px', color: '#e6edf3', marginBottom: '8px', fontWeight: 500 }}>
-            No events yet
-          </div>
-          <p style={{ color: '#8b949e', fontSize: '14px', marginBottom: '20px' }}>
-            Connect a channel first, or create a Luma event directly
-          </p>
-          <button
-            onClick={() => setModalOpen(true)}
-            style={{
-              background: '#388bfd', border: 'none', borderRadius: '6px',
-              color: '#fff', padding: '9px 18px', fontSize: '14px', fontWeight: 500,
-              cursor: 'pointer',
-            }}
-          >
-            Create Event
+      {/* Tabs */}
+      <div style={{ display:'flex', gap:'4px', marginBottom:'24px', background:'#161b22', border:'1px solid #30363d', borderRadius:'8px', padding:'4px' }}>
+        {TABS.map(({ key, label, color }) => (
+          <button key={key} onClick={() => setTab(key)} style={{ flex:1, padding:'8px 16px', borderRadius:'6px', border:'none', cursor:'pointer', fontSize:'13px', fontWeight:500, background: tab===key ? '#1c2128' : 'transparent', color: tab===key ? color : '#8b949e', boxShadow: tab===key ? `0 0 0 1px ${color}4d` : 'none' }}>
+            {label}
           </button>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          {events.map((evt) => (
-            <div
-              key={`${evt.source}-${evt.id}`}
-              style={{
-                background: '#161b22', border: '1px solid #30363d',
-                borderRadius: '10px', padding: '20px',
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex', alignItems: 'flex-start',
-                  justifyContent: 'space-between', gap: '12px',
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div
-                    style={{
-                      fontSize: '15px', fontWeight: 600, color: '#e6edf3', marginBottom: '6px',
-                    }}
-                  >
-                    {evt.title}
-                  </div>
-                  <div
-                    style={{
-                      display: 'flex', gap: '8px', flexWrap: 'wrap',
-                      fontSize: '12px', color: '#8b949e', marginBottom: '8px',
-                    }}
-                  >
-                    <span>📅 {formatDate(evt.startUtc)}</span>
-                    <span>·</span>
-                    <span
-                      style={{
-                        padding: '2px 7px', borderRadius: '4px',
-                        background: evt.source === 'luma' ? 'rgba(34,211,238,0.1)' : 'rgba(251,191,36,0.1)',
-                        border: `1px solid ${evt.source === 'luma' ? 'rgba(34,211,238,0.3)' : 'rgba(251,191,36,0.3)'}`,
-                        color: evt.source === 'luma' ? '#22d3ee' : '#fbbf24',
-                      }}
-                    >
-                      {evt.source === 'luma' ? '✨ Luma' : '🎫 Eventbrite'}
-                    </span>
-                  </div>
-                </div>
-                {evt.url && (
-                  <a
-                    href={evt.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: '4px',
-                      background: 'rgba(56,139,253,0.15)',
-                      border: '1px solid rgba(56,139,253,0.4)',
-                      borderRadius: '6px', color: '#388bfd',
-                      padding: '6px 12px', fontSize: '12px', fontWeight: 500,
-                      textDecoration: 'none', whiteSpace: 'nowrap', flexShrink: 0,
-                    }}
-                  >
-                    View ↗
-                  </a>
-                )}
+        ))}
+      </div>
+
+      {/* ── HighTribe tab ───────────────────────────────────────────────────── */}
+      {tab === 'hightribe' && (
+        <div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'16px', gap:'8px' }}>
+            <span style={{ fontSize:'13px', color:'#8b949e' }}>
+              {htTotal !== null ? `${htTotal} events hosted by you` : 'Your hosted events'}
+            </span>
+            <button onClick={() => loadHtEvents(1)} disabled={htLoading} style={{ background:'#1c2128', border:'1px solid #30363d', borderRadius:'6px', color:'#8b949e', padding:'6px 14px', fontSize:'13px', cursor:'pointer' }}>
+              {htLoading ? '…' : '↻ Refresh'}
+            </button>
+          </div>
+          {htLoading ? (
+            <div style={{ color:'#8b949e', fontSize:'14px', padding:'40px 0', textAlign:'center' }}>Loading HighTribe events…</div>
+          ) : htEvents.length === 0 ? (
+            <EmptyState channel="HighTribe" />
+          ) : (
+            <>
+              <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+                {htEvents.map((evt) => {
+                  const d = evt.dates
+                  const dateStr = d?.starts_at ? fmtUtc(d.starts_at) : fmt(d?.start_date, d?.start_time)
+                  const loc = evt.location ? [evt.location.venue_name, evt.location.city, evt.location.country].filter(Boolean).join(', ') : undefined
+                  const image = evt.cover_image || evt.cover_image_aspect_ratio?.[0]?.image || undefined
+                  const url = evt.share_url || (evt.slug ? `https://hightribe.com/events/${evt.slug}` : undefined)
+                  const displayStatus = evt.publish_status || evt.status
+                  return (
+                    <div key={String(evt.id)} style={{ position:'relative' }}>
+                      <EventCard
+                        image={image} title={evt.title} dateStr={dateStr}
+                        badge="🏔 HighTribe" badgeColor="#a78bfa"
+                        location={loc} url={url} status={displayStatus}
+                        onEdit={() => openEdit('hightribe', evt.id)}
+                        onDelete={() => setDeleteTarget({ channel:'hightribe', id:evt.id, title:evt.title })}
+                      />
+                      <button
+                        onClick={() => setSyncEvent({ id:evt.id, title:evt.title, source:'hightribe' })}
+                        title="Publish to other channels"
+                        style={{ position:'absolute', bottom:'14px', right: url ? '88px' : '14px', background:'rgba(167,139,250,0.15)', border:'1px solid rgba(167,139,250,0.4)', borderRadius:'6px', color:'#a78bfa', padding:'5px 10px', fontSize:'12px', fontWeight:500, cursor:'pointer' }}
+                      >
+                        ↗ Publish to…
+                      </button>
+                    </div>
+                  )
+                })}
               </div>
-            </div>
-          ))}
+              {htLastPage > 1 && (
+                <div style={{ display:'flex', justifyContent:'center', gap:'8px', marginTop:'24px' }}>
+                  <button onClick={() => loadHtEvents(htPage - 1)} disabled={htPage <= 1 || htLoading} style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:'6px', color: htPage<=1 ? '#8b949e' : '#e6edf3', padding:'6px 14px', fontSize:'13px', cursor: htPage<=1 ? 'default' : 'pointer', opacity: htPage<=1 ? 0.5 : 1 }}>← Prev</button>
+                  <span style={{ fontSize:'13px', color:'#8b949e', padding:'6px 8px' }}>Page {htPage} / {htLastPage}{htTotal !== null && <span style={{ marginLeft:'6px' }}>· {htTotal} events</span>}</span>
+                  <button onClick={() => loadHtEvents(htPage + 1)} disabled={htPage >= htLastPage || htLoading} style={{ background:'#161b22', border:'1px solid #30363d', borderRadius:'6px', color: htPage>=htLastPage ? '#8b949e' : '#e6edf3', padding:'6px 14px', fontSize:'13px', cursor: htPage>=htLastPage ? 'default' : 'pointer', opacity: htPage>=htLastPage ? 0.5 : 1 }}>Next →</button>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
 
-      {/* Create Event Modal */}
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Create Luma Event" width={640}>
-        <form onSubmit={handleSubmit}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-
-            {/* Title */}
-            <div>
-              <label style={LABEL_STYLE}>Title *</label>
-              <input
-                type="text" required value={form.title}
-                onChange={(e) => handleField('title', e.target.value)}
-                placeholder="Event title" style={INPUT_STYLE}
-              />
-            </div>
-
-            {/* Summary */}
-            <div>
-              <label style={LABEL_STYLE}>Summary</label>
-              <input
-                type="text" value={form.summary}
-                onChange={(e) => handleField('summary', e.target.value)}
-                placeholder="Short description" style={INPUT_STYLE}
-              />
-            </div>
-
-            {/* Description */}
-            <div>
-              <label style={LABEL_STYLE}>Description</label>
-              <textarea
-                value={form.description}
-                onChange={(e) => handleField('description', e.target.value)}
-                placeholder="Full event description"
-                rows={3}
-                style={{ ...INPUT_STYLE, resize: 'vertical', fontFamily: 'inherit' }}
-              />
-            </div>
-
-            {/* Start / End */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-              <div>
-                <label style={LABEL_STYLE}>Start *</label>
-                <input
-                  type="datetime-local" required value={form.startUtc}
-                  onChange={(e) => handleField('startUtc', e.target.value)}
-                  style={INPUT_STYLE}
-                />
-              </div>
-              <div>
-                <label style={LABEL_STYLE}>End *</label>
-                <input
-                  type="datetime-local" required value={form.endUtc}
-                  onChange={(e) => handleField('endUtc', e.target.value)}
-                  style={INPUT_STYLE}
-                />
-              </div>
-            </div>
-
-            {/* Timezone */}
-            <div>
-              <label style={LABEL_STYLE}>Timezone</label>
-              <select
-                value={form.timezone}
-                onChange={(e) => handleField('timezone', e.target.value)}
-                style={INPUT_STYLE}
-              >
-                {TIMEZONES.map((tz) => <option key={tz} value={tz}>{tz}</option>)}
-              </select>
-            </div>
-
-            {/* Format */}
-            <div>
-              <label style={LABEL_STYLE}>Format</label>
-              <select
-                value={form.format}
-                onChange={(e) => handleField('format', e.target.value as EventFormat)}
-                style={INPUT_STYLE}
-              >
-                <option value="in_person">In Person</option>
-                <option value="online">Online</option>
-                <option value="hybrid">Hybrid</option>
-              </select>
-            </div>
-
-            {/* Venue fields (in_person / hybrid) */}
-            {(form.format === 'in_person' || form.format === 'hybrid') && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                <div>
-                  <label style={LABEL_STYLE}>Venue Name</label>
-                  <input type="text" value={form.venueName}
-                    onChange={(e) => handleField('venueName', e.target.value)}
-                    placeholder="Venue name" style={INPUT_STYLE} />
-                </div>
-                <div>
-                  <label style={LABEL_STYLE}>Address</label>
-                  <input type="text" value={form.address}
-                    onChange={(e) => handleField('address', e.target.value)}
-                    placeholder="Street address" style={INPUT_STYLE} />
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                  <div>
-                    <label style={LABEL_STYLE}>City</label>
-                    <input type="text" value={form.city}
-                      onChange={(e) => handleField('city', e.target.value)}
-                      placeholder="City" style={INPUT_STYLE} />
-                  </div>
-                  <div>
-                    <label style={LABEL_STYLE}>Country</label>
-                    <input type="text" value={form.country}
-                      onChange={(e) => handleField('country', e.target.value)}
-                      placeholder="Country" style={INPUT_STYLE} />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Online URL (online / hybrid) */}
-            {(form.format === 'online' || form.format === 'hybrid') && (
-              <div>
-                <label style={LABEL_STYLE}>Online URL</label>
-                <input type="url" value={form.onlineUrl}
-                  onChange={(e) => handleField('onlineUrl', e.target.value)}
-                  placeholder="https://meet.example.com/..." style={INPUT_STYLE} />
-              </div>
-            )}
-
-            {/* Capacity */}
-            <div>
-              <label style={LABEL_STYLE}>Capacity</label>
-              <input type="number" min="1" value={form.capacity}
-                onChange={(e) => handleField('capacity', e.target.value)}
-                placeholder="Unlimited" style={INPUT_STYLE} />
-            </div>
-
-            {/* Tags */}
-            <div>
-              <label style={LABEL_STYLE}>Tags (comma-separated)</label>
-              <input type="text" value={form.tags}
-                onChange={(e) => handleField('tags', e.target.value)}
-                placeholder="music, tech, networking" style={INPUT_STYLE} />
-            </div>
-
-            {/* Submit */}
-            <div
-              style={{
-                display: 'flex', justifyContent: 'flex-end', gap: '10px',
-                paddingTop: '8px', borderTop: '1px solid #30363d',
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setModalOpen(false)}
-                style={{
-                  background: 'none', border: '1px solid #30363d', borderRadius: '6px',
-                  color: '#8b949e', padding: '8px 16px', fontSize: '14px', cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={submitting}
-                style={{
-                  background: '#388bfd', border: 'none', borderRadius: '6px',
-                  color: '#fff', padding: '8px 20px', fontSize: '14px', fontWeight: 500,
-                  cursor: submitting ? 'default' : 'pointer',
-                  opacity: submitting ? 0.7 : 1,
-                }}
-              >
-                {submitting ? 'Creating…' : 'Create Event'}
-              </button>
-            </div>
+      {/* ── Luma tab ──────────────────────────────────────────────────────── */}
+      {tab === 'luma' && (
+        <div>
+          <div style={{ display:'flex', justifyContent:'flex-end', gap:'8px', marginBottom:'16px' }}>
+            <button onClick={loadLumaEvents} disabled={lumaLoading} style={{ background:'#1c2128', border:'1px solid #30363d', borderRadius:'6px', color:'#8b949e', padding:'6px 14px', fontSize:'13px', cursor:'pointer' }}>
+              {lumaLoading ? '…' : '↻ Refresh'}
+            </button>
           </div>
-        </form>
-      </Modal>
+          {lumaLoading ? (
+            <div style={{ color:'#8b949e', fontSize:'14px', padding:'40px 0', textAlign:'center' }}>Loading Luma events…</div>
+          ) : lumaEvents.length === 0 ? (
+            <EmptyState channel="Luma" />
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+              {lumaEvents.map((evt) => {
+                const url = evt.url
+                return (
+                  <div key={evt.api_id} style={{ position:'relative' }}>
+                    <EventCard
+                      image={evt.cover_url} title={evt.name} dateStr={fmtUtc(evt.start_at)}
+                      badge="✨ Luma" badgeColor="#22d3ee"
+                      location={evt.geo_address_json?.full_address || evt.geo_address_json?.city}
+                      url={url}
+                      onEdit={() => openEdit('luma', evt.api_id)}
+                      onDelete={() => setDeleteTarget({ channel:'luma', id:evt.api_id, title:evt.name })}
+                    />
+                    <button
+                      onClick={() => setSyncEvent({ id:evt.api_id, title:evt.name, source:'luma' })}
+                      title="Publish to other channels"
+                      style={{ position:'absolute', bottom:'14px', right: url ? '88px' : '14px', background:'rgba(34,211,238,0.15)', border:'1px solid rgba(34,211,238,0.4)', borderRadius:'6px', color:'#22d3ee', padding:'5px 10px', fontSize:'12px', fontWeight:500, cursor:'pointer' }}
+                    >
+                      ↗ Publish to…
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Eventbrite tab ────────────────────────────────────────────────── */}
+      {tab === 'eventbrite' && (
+        <div>
+          <div style={{ display:'flex', justifyContent:'flex-end', gap:'8px', marginBottom:'16px' }}>
+            <button onClick={loadEbEvents} disabled={ebLoading} style={{ background:'#1c2128', border:'1px solid #30363d', borderRadius:'6px', color:'#8b949e', padding:'6px 14px', fontSize:'13px', cursor:'pointer' }}>
+              {ebLoading ? '…' : '↻ Refresh'}
+            </button>
+          </div>
+          {ebLoading ? (
+            <div style={{ color:'#8b949e', fontSize:'14px', padding:'40px 0', textAlign:'center' }}>Loading Eventbrite events…</div>
+          ) : ebEvents.length === 0 ? (
+            <EmptyState channel="Eventbrite" />
+          ) : (
+            <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+              {ebEvents.map((evt) => {
+                const title = evt.name?.text || 'Untitled'
+                const url = evt.url
+                return (
+                  <div key={evt.id} style={{ position:'relative' }}>
+                    <EventCard
+                      image={evt.logo?.original?.url}
+                      title={title}
+                      dateStr={fmtUtc(evt.start?.utc)}
+                      badge="🎫 Eventbrite" badgeColor="#fbbf24"
+                      url={url} status={evt.status}
+                      onEdit={() => openEdit('eventbrite', evt.id)}
+                      onDelete={() => setDeleteTarget({ channel:'eventbrite', id:evt.id, title })}
+                    />
+                    <button
+                      onClick={() => setSyncEvent({ id:evt.id, title, source:'eventbrite' })}
+                      title="Publish to other channels"
+                      style={{ position:'absolute', bottom:'14px', right: url ? '88px' : '14px', background:'rgba(251,191,36,0.15)', border:'1px solid rgba(251,191,36,0.4)', borderRadius:'6px', color:'#fbbf24', padding:'5px 10px', fontSize:'12px', fontWeight:500, cursor:'pointer' }}
+                    >
+                      ↗ Publish to…
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }

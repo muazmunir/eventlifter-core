@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { getSettings, getEvents } from '@/lib/api'
+import { getUser } from '@/lib/auth'
 import type { MasterEvent } from '@/lib/types'
 
 function StatCard({
@@ -86,7 +87,8 @@ export default function DashboardPage() {
 
   const lumaConfigured = !!(settings.luma?.configured)
   const ebConfigured = !!(settings.eventbrite?.configured || settings.eventbrite?.hasPrivateToken)
-  const htConfigured = !!(settings.hightribe?.configured)
+  const htUser = getUser()
+  const htConfigured = !!htUser
   const recentEvents = events.slice(0, 3)
   const anyConfigured = lumaConfigured || ebConfigured || htConfigured
 
@@ -116,7 +118,7 @@ export default function DashboardPage() {
         />
         <StatCard
           label="HighTribe"
-          value={loading ? '…' : htConfigured ? 'Connected' : 'Not set'}
+          value={loading ? '…' : htConfigured ? (htUser?.name?.split(' ')[0] || 'Connected') : 'Not set'}
           color={htConfigured ? '#a78bfa' : '#8b949e'}
         />
       </div>
@@ -200,7 +202,7 @@ export default function DashboardPage() {
               }}
             >
               No events yet.{' '}
-              <Link href="/events" style={{ color: '#388bfd', textDecoration: 'none' }}>
+              <Link href="/events?create=1" style={{ color: '#388bfd', textDecoration: 'none' }}>
                 Create one →
               </Link>
             </div>

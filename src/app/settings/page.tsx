@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react'
 import { api } from '@/lib/api'
 import { Toast, useToast } from '@/components/Toast'
+import { getUser } from '@/lib/auth'
+import type { HtUser } from '@/lib/auth'
 
 const INPUT_STYLE: React.CSSProperties = {
   width: '100%', background: '#0d1117', border: '1px solid #30363d',
@@ -70,6 +72,55 @@ function CopyButton({ value }: { value: string }) {
   )
 }
 
+function WebhookSetup() {
+  const [loading, setLoading] = useState(false)
+  const [endpoints, setEndpoints] = useState<Record<string, string>>({})
+  const [result, setResult] = useState<string>('')
+
+  useEffect(() => {
+    fetch('/api/webhooks/setup').then(r => r.json()).then((d: { endpoints?: Record<string, string> }) => {
+      if (d.endpoints) setEndpoints(d.endpoints)
+    }).catch(() => {})
+  }, [])
+
+  const setup = async () => {
+    setLoading(true)
+    setResult('')
+    try {
+      const res = await fetch('/api/webhooks/setup', { method: 'POST' })
+      const data = await res.json() as { webhooks?: Record<string, { ok?: boolean; error?: string; url?: string }> }
+      const lines = Object.entries(data.webhooks || {}).map(([ch, r]) =>
+        `${ch}: ${r.ok ? '✓ registered' : `✗ ${r.error || 'failed'}`}`,
+      )
+      setResult(lines.join('\n'))
+    } catch (e) {
+      setResult(e instanceof Error ? e.message : 'Setup failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div>
+      {Object.entries(endpoints).map(([ch, url]) => (
+        <div key={ch} style={{ marginBottom: '10px' }}>
+          <div style={LABEL_STYLE}>{ch}</div>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <code style={{ flex: 1, fontSize: '12px', color: '#e6edf3', background: '#0d1117', padding: '8px 10px', borderRadius: '6px', border: '1px solid #30363d', overflow: 'auto' }}>{url}</code>
+            <CopyButton value={url} />
+          </div>
+        </div>
+      ))}
+      <button onClick={setup} disabled={loading} style={{ ...BTN_PRIMARY, marginTop: '8px', opacity: loading ? 0.6 : 1 }}>
+        {loading ? 'Registering…' : 'Register webhooks on Luma + Eventbrite'}
+      </button>
+      {result && (
+        <pre style={{ marginTop: '12px', fontSize: '12px', color: '#8b949e', whiteSpace: 'pre-wrap' }}>{result}</pre>
+      )}
+    </div>
+  )
+}
+
 type SettingsShape = {
   eventbrite?: Record<string, string>
   luma?: Record<string, string>
@@ -82,7 +133,12 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState<string | null>(null)
   const [testing, setTesting] = useState<string | null>(null)
   const [oauthHostId, setOauthHostId] = useState('')
+  const [htUser, setHtUser] = useState<HtUser | null>(null)
   const { toasts, toast, removeToast } = useToast()
+
+  useEffect(() => {
+    setHtUser(getUser())
+  }, [])
 
   useEffect(() => {
     loadSettings()
@@ -152,7 +208,6 @@ export default function SettingsPage() {
   const DEFAULT_REDIRECT = 'http://localhost:3000/api/eventbrite/callback'
   const eb = settings.eventbrite || {}
   const lu = settings.luma || {}
-  const ht = settings.hightribe || {}
 
   return (
     <div style={{ maxWidth: '720px' }}>
@@ -318,42 +373,74 @@ export default function SettingsPage() {
             </div>
           </SectionCard>
 
-          {/* HighTribe */}
+          {/* HighTribe — auto-configured via login */}
           <SectionCard title="HighTribe" icon="🏔️" color="#a78bfa">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div>
-                  <label style={LABEL_STYLE}>Service URL</label>
-                  <input type="url" style={INPUT_STYLE}
-                    value={ht.serviceUrl || ''}
-                    onChange={(e) => updateSection('hightribe', 'serviceUrl', e.target.value)}
-                    placeholder="http://localhost:4000" />
+            {htUser ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+                <div style={{
+                  width: '48px', height: '48px', borderRadius: '50%', flexShrink: 0,
+                  background: 'linear-gradient(135deg, #a78bfa, #388bfd)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '20px', fontWeight: 700, color: '#fff',
+                }}>
+                  {htUser.name?.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase() || '?'}
                 </div>
-                <div>
-                  <label style={LABEL_STYLE}>API Key</label>
-                  <input type="password" style={INPUT_STYLE}
-                    value={ht.apiKey || ''}
-                    onChange={(e) => updateSection('hightribe', 'apiKey', e.target.value)}
-                    placeholder="ht-xxxxxxxx" />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: '15px', fontWeight: 600, color: '#e6edf3', marginBottom: '4px' }}>
+                    {htUser.name}
+                  </div>
+                  <div style={{ fontSize: '13px', color: '#8b949e', marginBottom: '8px' }}>
+                    {htUser.email}
+                    {htUser.username && <span style={{ marginLeft: '8px', color: '#a78bfa' }}>@{htUser.username}</span>}
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{
+                      fontSize: '12px', padding: '3px 10px', borderRadius: '20px',
+                      background: 'rgba(63,185,80,0.1)', border: '1px solid rgba(63,185,80,0.3)',
+                      color: '#3fb950',
+                    }}>
+                      ✓ Connected via login
+                    </span>
+                    {htUser.has_business_profile && (
+                      <span style={{
+                        fontSize: '12px', padding: '3px 10px', borderRadius: '20px',
+                        background: 'rgba(167,139,250,0.1)', border: '1px solid rgba(167,139,250,0.3)',
+                        color: '#a78bfa',
+                      }}>
+                        Business Profile
+                      </span>
+                    )}
+                    {htUser.type && (
+                      <span style={{
+                        fontSize: '12px', padding: '3px 10px', borderRadius: '20px',
+                        background: '#1c2128', border: '1px solid #30363d', color: '#8b949e',
+                      }}>
+                        {htUser.type}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
+            ) : (
               <div style={{
-                padding: '12px 14px', background: 'rgba(167,139,250,0.08)',
-                borderRadius: '6px', border: '1px solid rgba(167,139,250,0.2)',
-                fontSize: '13px', color: '#8b949e',
+                padding: '16px', background: 'rgba(167,139,250,0.06)',
+                borderRadius: '8px', border: '1px solid rgba(167,139,250,0.2)',
+                fontSize: '13px', color: '#8b949e', textAlign: 'center',
               }}>
-                HighTribe proxies through <code style={{ color: '#a78bfa' }}>/api/hightribe/*</code> to your configured service URL.
+                HighTribe is configured automatically when you sign in.<br />
+                <a href="/login" style={{ color: '#a78bfa', textDecoration: 'none', marginTop: '6px', display: 'inline-block' }}>
+                  Sign in to connect →
+                </a>
               </div>
-              <div>
-                <button
-                  onClick={() => saveSection('hightribe')}
-                  disabled={saving === 'hightribe'}
-                  style={{ ...BTN_PRIMARY, opacity: saving === 'hightribe' ? 0.6 : 1 }}
-                >
-                  {saving === 'hightribe' ? 'Saving…' : 'Save'}
-                </button>
-              </div>
-            </div>
+            )}
+          </SectionCard>
+
+          {/* Webhooks */}
+          <SectionCard title="Webhooks" icon="🔔" color="#3fb950">
+            <p style={{ fontSize: '13px', color: '#8b949e', margin: '0 0 14px', lineHeight: 1.5 }}>
+              Register webhooks on Luma + Eventbrite so ticket bookings on one channel auto-update capacity on the others.
+            </p>
+            <WebhookSetup />
           </SectionCard>
 
           {/* settings.json reference */}
@@ -372,7 +459,6 @@ export default function SettingsPage() {
                 `eventbrite.clientId=${eb.clientId || ''}`,
                 `eventbrite.redirectUri=${eb.redirectUri || DEFAULT_REDIRECT}`,
                 `luma.calendarId=${lu.calendarId || ''}`,
-                `hightribe.serviceUrl=${ht.serviceUrl || ''}`,
               ].join('\n')} />
             </div>
             <pre style={{
@@ -386,7 +472,7 @@ eventbrite.redirectUri = ${eb.redirectUri || DEFAULT_REDIRECT}
 luma.calendarId        = ${lu.calendarId || '<not set>'}
 luma.apiBaseUrl        = ${lu.apiBaseUrl || 'https://public-api.luma.com'}
 
-hightribe.serviceUrl   = ${ht.serviceUrl || '<not set>'}`}
+hightribe              = configured via login (token stored in browser)`}
             </pre>
           </div>
         </>

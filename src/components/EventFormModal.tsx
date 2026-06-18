@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { authHeader } from '@/lib/auth'
+import { buildEbTicketClass } from '@/lib/eventbrite-ticket'
 
 export type Channel = 'hightribe' | 'luma' | 'eventbrite'
 export type FormMode = 'create' | 'edit'
@@ -369,8 +370,13 @@ export function EventFormModal({ open, mode, channel: initChannel, eventId, onCl
       if (vRes.ok) { const vData = await vRes.json() as { id?: string }; if (vData.id) await fetch(`/api/eventbrite/events/${eventId2}`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ event: { venue_id: vData.id } }) }) }
     }
     setStatusMsg('Creating tickets…')
-    const tc: Record<string, unknown> = { name: eb.ticketName || 'General Admission', quantity_total: eb.ticketQuantity ? parseInt(eb.ticketQuantity) : undefined }
-    if (eb.ticketType === 'free') { tc.free = true } else { tc.cost = { currency: eb.currency, value: Math.round(parseFloat(eb.ticketPrice || '0') * 100) } }
+    const tc = buildEbTicketClass({
+      name: eb.ticketName || 'General Admission',
+      free: eb.ticketType === 'free',
+      capacity: eb.ticketQuantity,
+      currency: eb.currency,
+      price: eb.ticketType === 'free' ? 0 : eb.ticketPrice,
+    })
     const tcRes = await fetch(`/api/eventbrite/events/${eventId2}/ticket_classes`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ ticket_class: tc }) })
     if (!tcRes.ok) { const d = await tcRes.json() as { error_description?: string }; throw new Error(`Tickets: ${d.error_description || `HTTP ${tcRes.status}`}`) }
   }

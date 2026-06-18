@@ -1,4 +1,5 @@
 import { authHeader } from '@/lib/auth'
+import { lumaEventToNorm, unwrapLumaEvent } from '@/lib/luma-event-utils'
 import type { ChannelKey } from '@/lib/types'
 import type { EventFormData } from '@/lib/publish-event'
 
@@ -149,23 +150,26 @@ async function fetchNorm(channel: ChannelKey, id: string | number): Promise<Norm
     const res = await fetch(`/api/luma/events?api_id=${id}`, {
       headers: { Authorization: authHeader(), Accept: 'application/json' },
     })
-    const raw = await res.json() as { data?: Record<string, unknown> } & Record<string, unknown>
-    const e = (raw.data || raw) as Record<string, unknown>
-    const geo = (e.geo_address_json || {}) as Record<string, unknown>
+    const raw = await res.json() as { data?: unknown; status?: string; message?: string }
+    if (!res.ok || raw.status === 'error') {
+      throw new Error(raw.message || `Failed to load Luma event (HTTP ${res.status})`)
+    }
+    const e = unwrapLumaEvent(raw.data ?? raw)
+    const norm = lumaEventToNorm(e)
     return {
-      title: String(e.name || ''),
-      description: String(e.description || ''),
-      startUtc: e.start_at ? stripMs(String(e.start_at)) : new Date().toISOString(),
-      endUtc: e.end_at ? stripMs(String(e.end_at)) : new Date().toISOString(),
-      timezone: String(e.timezone || 'UTC'),
-      coverImage: optStr(e.cover_url),
-      isOnline: !!(e.meeting_url),
-      onlineUrl: optStr(e.meeting_url),
-      address: optStr(geo.address) || optStr(geo.full_address),
-      city: optStr(geo.city),
-      country: optStr(geo.country),
-      lat: parseCoord(geo.latitude),
-      lng: parseCoord(geo.longitude),
+      title: norm.title,
+      description: norm.description,
+      startUtc: norm.startUtc,
+      endUtc: norm.endUtc,
+      timezone: norm.timezone,
+      coverImage: norm.coverImage,
+      isOnline: norm.isOnline,
+      onlineUrl: norm.onlineUrl,
+      address: norm.address,
+      city: norm.city,
+      country: norm.country,
+      lat: norm.lat,
+      lng: norm.lng,
       requireApproval: !!(e.require_rsvp_approval),
       capacity: typeof e.capacity === 'number' ? e.capacity : undefined,
     }

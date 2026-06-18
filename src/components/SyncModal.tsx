@@ -2,12 +2,27 @@
 
 import { useState } from 'react'
 import { authHeader } from '@/lib/auth'
+import { buildEbTicketClass, ebTicketQuantity } from '@/lib/eventbrite-ticket'
+import { resolveEbTimezone } from '@/lib/eventbrite-timezone'
+import { lumaEntryMatchesId, lumaEventToNorm, unwrapLumaEvent } from '@/lib/luma-event-utils'
 
 export type SyncSource = 'hightribe' | 'luma' | 'eventbrite'
 
 const EB_VALID_CURRENCIES = new Set(['USD','CAD','GBP','EUR','AUD','NZD','SGD','HKD','MYR','CHF','INR','BRL','MXN','SEK','NOK','DKK','JPY','ZAR','TWD','TRY','PLN','CZK','HUF','ILS','ARS','CLP','PEN','UYU','PHP','IDR','KRW'])
 function toEbCurrency(c?: string): string {
   return (c && EB_VALID_CURRENCIES.has(c.toUpperCase())) ? c.toUpperCase() : 'USD'
+}
+
+function toEbHtml(text: string): string {
+  const t = text.trim()
+  if (!t) return '<p>Untitled Event</p>'
+  if (/[<][a-z]/i.test(t)) return t
+  const esc = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return `<p>${esc}</p>`
+}
+
+function ebEventTitle(norm: NormEvent, fallback?: string): string {
+  return (norm.title || fallback || 'Untitled Event').trim()
 }
 
 type ChannelKey = 'hightribe' | 'luma' | 'eventbrite'
@@ -35,6 +50,7 @@ interface NormEvent {
   lng?: number
   currency?: string
   onlineUrl?: string
+  capacity?: number
 }
 
 interface Props {
@@ -86,6 +102,15 @@ function parseCoord(v: unknown): number | undefined {
   return undefined
 }
 
+function parseCapacity(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.floor(v)
+  if (typeof v === 'string' && v.trim()) {
+    const n = parseInt(v, 10)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return undefined
+}
+
 async function fetchHtEvent(id: string | number): Promise<NormEvent> {
   const res = await fetch(`/api/hightribe/events/${id}`, {
     headers: { Authorization: authHeader(), Accept: 'application/json' },
@@ -111,33 +136,49 @@ async function fetchHtEvent(id: string | number): Promise<NormEvent> {
     lat: parseCoord(loc?.lat),
     lng: parseCoord(loc?.lng),
     currency: optStr(e.currency),
+    capacity: parseCapacity(e.capacity ?? e.seats ?? e.max_attendees),
   }
 }
 
-async function fetchLumaEvent(id: string | number): Promise<NormEvent> {
-  const res = await fetch(`/api/luma/events?api_id=${id}`, {
+async function fetchLumaEventFromList(id: string | number): Promise<NormEvent | null> {
+  const res = await fetch('/api/luma/events/hosted?upcoming_only=false&fetch_all=true', {
     headers: { Authorization: authHeader(), Accept: 'application/json' },
   })
-  const raw = await res.json() as { data?: Record<string, unknown> } & Record<string, unknown>
-  const e = (raw.data || raw) as Record<string, unknown>
-  const geo = (e.geo_address_json || {}) as Record<string, unknown>
-  const startUtc = e.start_at ? stripMs(String(e.start_at)) : new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-  const endUtc   = e.end_at   ? stripMs(String(e.end_at))   : new Date(Date.now() + 3600_000).toISOString().replace(/\.\d{3}Z$/, 'Z')
-  return {
-    title: String(e.name || ''),
-    description: String(e.description || ''),
-    startUtc, endUtc,
-    timezone: String(e.timezone || 'UTC'),
-    coverImage: optStr(e.cover_url),
-    isOnline: !!(e.meeting_url),
-    onlineUrl: optStr(e.meeting_url),
-    venueName: '',
-    address: optStr(geo.address) || optStr(geo.full_address),
-    city: optStr(geo.city),
-    country: optStr(geo.country),
-    lat: parseCoord(geo.latitude),
-    lng: parseCoord(geo.longitude),
+  const raw = await res.json() as { data?: { entries?: unknown[] }; entries?: unknown[]; status?: string }
+  if (!res.ok || raw.status === 'error') return null
+  const entries = raw.data?.entries || raw.entries || []
+  for (const entry of entries) {
+    if (!lumaEntryMatchesId(entry, id)) continue
+    const e = unwrapLumaEvent(entry)
+    const norm = lumaEventToNorm(e)
+    return { ...norm, venueName: '', capacity: norm.capacity }
   }
+  return null
+}
+
+async function fetchLumaEvent(id: string | number, fallbackTitle?: string): Promise<NormEvent> {
+  try {
+    const res = await fetch(`/api/luma/events?api_id=${encodeURIComponent(String(id))}`, {
+      headers: { Authorization: authHeader(), Accept: 'application/json' },
+    })
+    const raw = await res.json() as { data?: unknown; status?: string; message?: string }
+    if (res.ok && raw.status !== 'error') {
+      const e = unwrapLumaEvent(raw.data ?? raw)
+      const norm = lumaEventToNorm(e)
+      if (norm.title || fallbackTitle) {
+        return { ...norm, title: norm.title || fallbackTitle || '', venueName: '' }
+      }
+    }
+  } catch {
+    // fall through to hosted list
+  }
+
+  const fromList = await fetchLumaEventFromList(id)
+  if (fromList) {
+    return { ...fromList, title: fromList.title || fallbackTitle || '' }
+  }
+
+  throw new Error(`Could not load Luma event ${id}`)
 }
 
 async function fetchEbEvent(id: string | number): Promise<NormEvent> {
@@ -230,10 +271,22 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
     let norm: NormEvent
     try {
       if (source === 'hightribe') norm = await fetchHtEvent(event.id)
-      else if (source === 'luma') norm = await fetchLumaEvent(event.id)
+      else if (source === 'luma') norm = await fetchLumaEvent(event.id, event.title)
       else norm = await fetchEbEvent(event.id)
     } catch (e) {
-      const err: ChannelResult = { status: 'error', message: 'Failed to fetch event details from source' }
+      const msg = e instanceof Error ? e.message : 'Failed to fetch event details from source'
+      const err: ChannelResult = { status: 'error', message: msg }
+      setResults(Object.fromEntries(targets.map((t) => [t, err])))
+      setPublishing(false)
+      setDone(true)
+      return
+    }
+
+    const publishTitle = ebEventTitle(norm, event.title)
+    norm = { ...norm, title: publishTitle }
+
+    if (!publishTitle) {
+      const err: ChannelResult = { status: 'error', message: 'Event title missing from source — cannot publish' }
       setResults(Object.fromEntries(targets.map((t) => [t, err])))
       setPublishing(false)
       setDone(true)
@@ -322,7 +375,12 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
 
           if (ch === 'eventbrite') {
             const { startUtc, endUtc } = ensureFuture(norm.startUtc, norm.endUtc)
-            const tz = norm.timezone || 'UTC'
+            const tz = await resolveEbTimezone(norm.timezone, startUtc, {
+              country: norm.country,
+              city: norm.city,
+            })
+            const ebTitle = ebEventTitle(norm, event.title)
+            const ebDesc = (norm.description || ebTitle).trim() || ebTitle
 
             const orgRes = await fetch('/api/eventbrite/users/me/organizations')
             const orgData = await orgRes.json() as { organizations?: Array<{ id: string }> }
@@ -331,8 +389,8 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
 
             const evtBody = {
               event: {
-                name: { html: norm.title },
-                description: { html: norm.description || norm.title },
+                name: { html: toEbHtml(ebTitle) },
+                description: { html: toEbHtml(ebDesc) },
                 start: { utc: startUtc, timezone: tz },
                 end: { utc: endUtc, timezone: tz },
                 currency: toEbCurrency(norm.currency),
@@ -382,7 +440,14 @@ export function SyncModal({ open, event, htConfigured, lumaConfigured, ebConfigu
             const tcRes = await fetch(`/api/eventbrite/events/${eventId2}/ticket_classes`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ ticket_class: { name: 'General Admission', free: true } }),
+              body: JSON.stringify({
+                ticket_class: buildEbTicketClass({
+                  name: 'General Admission',
+                  free: true,
+                  capacity: ebTicketQuantity(norm.capacity),
+                  currency: norm.currency,
+                }),
+              }),
             })
             if (!tcRes.ok) {
               const d = await tcRes.json() as { error_description?: string }

@@ -2,6 +2,8 @@
 
 import { authHeader } from '@/lib/auth'
 import type { ChannelKey } from '@/lib/types'
+import { buildEbTicketClass, ebTicketQuantity } from '@/lib/eventbrite-ticket'
+import { resolveEbTimezone } from '@/lib/eventbrite-timezone'
 
 export type EventFormData = Record<string, string | boolean>
 
@@ -32,7 +34,7 @@ export async function publishToChannel(
   const tz = String(ev.timezone || 'UTC')
   const startUtc = toIso(String(ev.date), String(ev.time), tz)
   const endUtc = toIso(String(ev.endDate || ev.date), String(ev.endTime || ev.time), tz)
-  const cap = parseInt(String(ev.capacity || '0')) || undefined
+  const cap = ebTicketQuantity(ev.capacity as string | number | undefined)
 
   if (ch === 'hightribe') {
     const startD = new Date(startUtc)
@@ -130,6 +132,11 @@ export async function publishToChannel(
   const orgId = orgData.organizations?.[0]?.id
   if (!orgId) throw new Error('No Eventbrite organization found')
 
+  const ebTz = await resolveEbTimezone(tz, startUtc, {
+    country: String(ev.country || ''),
+    city: String(ev.city || ''),
+  })
+
   const evtRes = await fetch(`/api/eventbrite/organizations/${orgId}/events`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -137,8 +144,8 @@ export async function publishToChannel(
       event: {
         name: { html: ev.title },
         description: { html: String(ev.description || ev.title) },
-        start: { utc: startUtc, timezone: tz },
-        end: { utc: endUtc, timezone: tz },
+        start: { utc: startUtc, timezone: ebTz },
+        end: { utc: endUtc, timezone: ebTz },
         currency: String(ev.currency || 'USD'),
         online_event: online && !inPerson,
         listed: ev.visibility === 'Public',
@@ -173,14 +180,13 @@ export async function publishToChannel(
     }
   }
 
-  const tc: Record<string, unknown> = {
+  const tc = buildEbTicketClass({
     name: 'General Admission',
-    quantity_total: cap,
-    quantity_minimum: ev.minPerOrder ? parseInt(String(ev.minPerOrder)) : undefined,
-    quantity_maximum: ev.maxPerOrder ? parseInt(String(ev.maxPerOrder)) : undefined,
-  }
-  if (ev.ticketType === 'Free') tc.free = true
-  else tc.cost = { currency: String(ev.currency || 'USD'), value: Math.round(parseFloat(String(ev.price || '0')) * 100) }
+    free: ev.ticketType === 'Free',
+    capacity: cap,
+    currency: String(ev.currency || 'USD'),
+    price: ev.ticketType === 'Free' ? 0 : ev.price,
+  })
 
   const tcRes = await fetch(`/api/eventbrite/events/${eventId}/ticket_classes`, {
     method: 'POST',

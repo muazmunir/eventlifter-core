@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { authHeader } from '@/lib/auth'
+import { buildEbTicketClass } from '@/lib/eventbrite-ticket'
 
 type TargetChannel = 'hightribe' | 'luma' | 'eventbrite'
 
@@ -265,25 +266,18 @@ export function CreateEventModal({ open, onClose, onCreated }: Props) {
 
         // 4. Create ticket class (required to publish)
         setStatusMsg('Creating ticket class…')
-        const ticketBody: Record<string, unknown> = {
-          ticket_class: {
-            name: form.ticketName || 'General Admission',
-            quantity_total: form.ticketQuantity ? parseInt(form.ticketQuantity) : undefined,
-          },
-        }
-        if (form.ticketType === 'free') {
-          ticketBody.ticket_class = { ...ticketBody.ticket_class as object, free: true }
-        } else {
-          const priceCents = Math.round(parseFloat(form.ticketPrice) * 100)
-          ticketBody.ticket_class = {
-            ...ticketBody.ticket_class as object,
-            cost: { currency: form.currency, value: priceCents },
-          }
-        }
         const ticketRes = await fetch(`/api/eventbrite/events/${eventId}/ticket_classes`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(ticketBody),
+          body: JSON.stringify({
+            ticket_class: buildEbTicketClass({
+              name: form.ticketName || 'General Admission',
+              free: form.ticketType === 'free',
+              capacity: form.ticketQuantity,
+              currency: form.currency,
+              price: form.ticketType === 'free' ? 0 : form.ticketPrice,
+            }),
+          }),
         })
         if (!ticketRes.ok) {
           const td = await ticketRes.json() as { error_description?: string }

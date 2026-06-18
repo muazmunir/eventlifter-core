@@ -1,4 +1,5 @@
 import { loadSettings } from '@/app/api/settings/route'
+import { lumaEntryMatchesId, unwrapLumaEvent } from '@/lib/luma-event-utils'
 
 export class LumaApiError extends Error {
   constructor(
@@ -94,6 +95,40 @@ export async function listHostedEvents(query: Record<string, string> = {}): Prom
   return { entries: allEntries, count: allEntries.length, has_more: false, source: 'luma_calendar_hosted' }
 }
 
+/** Fetch one Luma event — tries current + legacy API params, then hosted list. */
+export async function getLumaEvent(eventId: string): Promise<Record<string, unknown>> {
+  const attempts: Array<{ path: string; query: Record<string, string> }> = [
+    { path: '/v1/events/get', query: { id: eventId } },
+    { path: '/v1/events/get', query: { event_id: eventId } },
+    { path: '/v1/events/get', query: { event_api_id: eventId } },
+    { path: '/v1/events/get', query: { api_id: eventId } },
+    { path: '/v1/event/get', query: { id: eventId } },
+    { path: '/v1/event/get', query: { api_id: eventId } },
+  ]
+
+  let lastErr: LumaApiError | null = null
+  for (const { path, query } of attempts) {
+    try {
+      return await lumaRequest('GET', path, { query })
+    } catch (e) {
+      if (e instanceof LumaApiError) lastErr = e
+    }
+  }
+
+  const list = await listHostedEvents({ upcoming_only: 'false', fetch_all: 'true' })
+  const entries = list.entries
+  if (Array.isArray(entries)) {
+    for (const entry of entries) {
+      if (lumaEntryMatchesId(entry, eventId)) {
+        const ev = unwrapLumaEvent(entry)
+        return { event: ev }
+      }
+    }
+  }
+
+  throw lastErr || new LumaApiError(`Luma event not found: ${eventId}`, 404)
+}
+
 /** Map Next.js proxy path segments to Luma API */
 export async function proxyLumaPath(
   pathSegments: string[],
@@ -108,9 +143,9 @@ export async function proxyLumaPath(
   }
 
   if (path === 'events' && method === 'GET') {
-    const eventId = query.api_id || query.event_id || query.event_api_id
+    const eventId = query.api_id || query.id || query.event_id || query.event_api_id
     if (!eventId) throw new LumaApiError('api_id or event_id required', 400)
-    return { data: await lumaRequest('GET', '/v1/events/get', { query: { event_api_id: eventId } }), status: 200 }
+    return { data: await getLumaEvent(eventId), status: 200 }
   }
 
   if (path === 'events' && method === 'POST') {

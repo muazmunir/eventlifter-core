@@ -291,65 +291,19 @@ curl https://ewentcast.com/api/webhooks/setup
 
 ## 10. Updates (naya code push)
 
-**Important:** Agar sirf `git pull` + `pm2 restart` karo bina clean build ke, site blank ho sakti hai — HTML purane JS chunks maangti hai jo disk par nahi (`500 Internal Server Error` on `/_next/static/chunks/*.js`).
-
-### Safe deploy (recommended)
-
 ```bash
 cd /var/www/eventlifter-core
-chmod +x scripts/deploy-prod.sh
-./scripts/deploy-prod.sh
-```
-
-Ya manually:
-
-```bash
-cd /var/www/eventlifter-core
-pm2 stop ewentcast
 git pull
 npm ci
-rm -rf .next
 npm run build
-pm2 start ewentcast   # ya: pm2 restart ewentcast
-pm2 save
+pm2 restart ewentcast
 ```
 
 `settings.json` aur `data/` **git pull se overwrite mat karo** — ye server par rehte hain.
 
-Browser cache clear karo (Ctrl+Shift+R) ya incognito mein test karo after deploy.
-
 ---
 
 ## 11. Common issues
-
-### Blank black screen + `/_next/static/chunks/*.js` 500 / 404
-
-**Symptom:** Console mein `GET .../_next/static/chunks/....js 500 (Internal Server Error)` — page black.
-
-**Cause:** `.next` folder **mixed/stale** hai — HTML ek build ki hai, chunk files doosri (ya missing). Common jab:
-- `npm run build` ke bina sirf `pm2 restart`
-- build ke dauran app chal rahi ho
-- partial upload / incomplete deploy
-
-**Fix:**
-
-```bash
-pm2 stop ewentcast
-cd /var/www/eventlifter-core
-rm -rf .next
-npm ci
-npm run build
-pm2 start ewentcast
-```
-
-Verify ek chunk jo HTML mein hai:
-
-```bash
-curl -I http://127.0.0.1:3000/_next/static/chunks/1gdoryk6w2r8v.js
-# 200 hona chahiye
-```
-
-Hard refresh browser: **Ctrl+Shift+R**.
 
 ### Apache directory listing / site nahi chal raha
 

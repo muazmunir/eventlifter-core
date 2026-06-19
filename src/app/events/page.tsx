@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
-import { authHeader, getUser } from '@/lib/auth'
+import { authHeader } from '@/lib/auth'
+import { fetchHtEventsPage, type HtEventListItem } from '@/lib/hightribe-events'
 import { Toast, useToast } from '@/components/Toast'
 import { SyncModal, SyncSource } from '@/components/SyncModal'
 import { CreateEventWizardModal } from '@/components/ewentcast/CreateEventWizardModal'
@@ -41,22 +42,7 @@ async function deleteOnChannel(channel: ChannelKey, id: string | number): Promis
 }
 
 // ─── HighTribe ───────────────────────────────────────────────────────────────
-interface HtDateInfo {
-  start_date?: string; start_time?: string; end_date?: string; end_time?: string
-  starts_at?: string; ends_at?: string; timezone?: string
-}
-interface HtLocation {
-  address?: string; city?: string; country?: string; venue_name?: string; type?: string
-}
-interface HtEvent {
-  id: string | number; user_id?: string | number; title: string
-  cover_image?: string; cover_image_aspect_ratio?: Array<{ image?: string }>
-  status?: string; publish_status?: string; is_active?: boolean
-  dates?: HtDateInfo; location?: HtLocation; slug?: string; share_url?: string
-}
-interface HtEventsResponse {
-  data?: HtEvent[]; current_page?: number; last_page?: number; total?: number
-}
+type HtEvent = HtEventListItem
 
 // ─── Luma ────────────────────────────────────────────────────────────────────
 interface LumaEvent {
@@ -281,18 +267,11 @@ export default function EventsPage() {
   const loadHtEvents = useCallback(async (page = 1) => {
     setHtLoading(true)
     try {
-      const user = getUser()
-      const params = new URLSearchParams({ per_page:'12', page:String(page), sort_field:'id', sort_direction:'desc' })
-      if (user?.email) params.set('user_email', user.email)
-      const res = await fetch(`/api/hightribe/events/all?${params}`, { headers:{ Authorization:authHeader(), Accept:'application/json' } })
-      const data: HtEventsResponse = await res.json()
-      const userId = user?.id
-      const all = data.data || []
-      const mine = userId ? all.filter(e => e.user_id === undefined || String(e.user_id) === String(userId)) : all
-      setHtEvents(mine)
-      setHtPage(data.current_page || 1)
-      setHtLastPage(data.last_page || 1)
-      if (data.total !== undefined) setHtTotal(mine.length < all.length ? mine.length : data.total)
+      const { events, currentPage, lastPage, total } = await fetchHtEventsPage(page, 12)
+      setHtEvents(events)
+      setHtPage(currentPage)
+      setHtLastPage(lastPage)
+      setHtTotal(total)
     } catch { toast.error('Failed to load HighTribe events') }
     finally { setHtLoading(false) }
   }, [toast])
@@ -445,10 +424,11 @@ export default function EventsPage() {
 
   useEffect(() => {
     fetch('/api/settings').then(r => r.json()).then((s: {
-      luma?: { apiKey?: string }; eventbrite?: { privateToken?: string; clientId?: string }
+      luma?: { apiKey?: string; configured?: boolean }
+      eventbrite?: { privateToken?: string; clientId?: string }
     }) => {
       setHtConfigured(true)
-      setLumaConfigured(!!s.luma?.configured)
+      setLumaConfigured(!!(s.luma?.configured || s.luma?.apiKey))
       setEbConfigured(!!(s.eventbrite?.privateToken || s.eventbrite?.clientId))
     }).catch(() => {})
   }, [])

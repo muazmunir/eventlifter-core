@@ -185,7 +185,7 @@ export async function publishToChannel(
     free: ev.ticketType === 'Free',
     capacity: cap,
     currency: String(ev.currency || 'USD'),
-    price: ev.ticketType === 'Free' ? 0 : ev.price,
+    price: ev.ticketType === 'Free' ? 0 : parseFloat(String(ev.price || '0')),
   })
 
   const tcRes = await fetch(`/api/eventbrite/events/${eventId}/ticket_classes`, {
